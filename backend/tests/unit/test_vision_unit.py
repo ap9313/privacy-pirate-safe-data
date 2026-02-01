@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from backend.app.ner.vision import VisionEngine
+from backend import VisionEngine
 from app.config import OLLAMA_BASE_URL, VISION_MODEL
 
 

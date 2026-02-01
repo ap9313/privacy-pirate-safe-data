@@ -6,7 +6,6 @@ from app.config import (
     NER_MODEL_NAME,
     NER_LABELS,
     NER_THRESHOLD,
-    SECRET_KEYWORDS,
     PII_REGEX_PATTERNS,
     DATA_DIR,
     GLINER_LOCAL_DIR,
@@ -40,10 +39,6 @@ class Scanner:
         self.ner_model = Scanner._model_instance
 
     def scan(self, text: str, chunk_size: int = SCANNER_CHUNK_SIZE, overlap: int = SCANNER_CHUNK_OVERLAP) -> List[Dict]:
-        """
-        Processes long text by splitting it into overlapping chunks.
-        Combines NER (GLiNER) findings with Regex findings.
-        """
         words = text.split()
         all_findings = []
 
@@ -53,11 +48,9 @@ class Scanner:
             for i in range(0, len(words), chunk_size - overlap):
                 chunk_words = words[i: i + chunk_size]
                 chunk_text = " ".join(chunk_words)
-
                 start_char_offset = len(" ".join(words[:i])) + (1 if i > 0 else 0)
 
                 chunk_findings = self._run_model_on_text(chunk_text)
-
                 for f in chunk_findings:
                     f['start'] += start_char_offset
                     f['end'] += start_char_offset
@@ -70,15 +63,9 @@ class Scanner:
         return self._deduplicate_findings(all_findings)
 
     def _deduplicate_findings(self, findings: List[Dict]) -> List[Dict]:
-        """
-        Removes exact duplicates and handles overlapping entities
-        (e.g., keeping the longest span or merging).
-        """
-        if not findings:
-            return []
-
+        if not findings: return []
         sorted_f = sorted(findings, key=lambda x: (x['start'], -(x['end'] - x['start'])))
-        unique_findings = []
+        unique = []
 
         if sorted_f:
             current = sorted_f[0]
@@ -89,11 +76,10 @@ class Scanner:
                     elif (next_f['end'] - next_f['start']) > (current['end'] - current['start']):
                         current = next_f
                 else:
-                    unique_findings.append(current)
+                    unique.append(current)
                     current = next_f
-            unique_findings.append(current)
-
-        return unique_findings
+            unique.append(current)
+        return unique
 
     def _run_model_on_text(self, text: str) -> List[Dict]:
         if not text.strip(): return []
@@ -104,9 +90,6 @@ class Scanner:
         } for e in entities]
 
     def _scan_for_secrets(self, text: str) -> List[Dict]:
-        """
-        Uses regex patterns from config to find actual secret values.
-        """
         findings = []
         for pattern, label in PII_REGEX_PATTERNS:
             for match in re.finditer(pattern, text):
@@ -118,63 +101,82 @@ class Scanner:
                     "start": match.start(),
                     "end": match.end()
                 })
-
         return findings
 
     def create_boomerang_map(self, findings: List[Dict]) -> Dict[str, str]:
-        """Creates map: 'John Smith' -> '<PERSON_1>'"""
         entity_map = {}
         counts = {}
         sorted_findings = sorted(findings, key=lambda x: len(x['text']), reverse=True)
+
         for f in sorted_findings:
             original = f['text']
             label = f['label'].upper().replace(" ", "_")
-            if label == "SECURITY_SECRET":
-                continue
-
+            if label == "SECURITY_SECRET": continue
             if original not in entity_map:
                 if label not in counts: counts[label] = 0
                 counts[label] += 1
-                entity_map[original] = f"<{label}_{counts[label]}>"
+                tag = f"<{label}_{counts[label]}>"
+                entity_map[original] = tag
+                if 'PERSON' in label:
+                    parts = original.split()
+                    if len(parts) > 1:
+                        for part in parts:
+                            if len(part) > 2 and part not in entity_map:
+                                entity_map[part] = tag
 
         return entity_map
 
     def restore_from_map(self, text: str, entity_map: Dict[str, str]) -> str:
-        """Restores Real Data"""
         for original, tag in entity_map.items():
             text = text.replace(tag, original)
         return text
 
     def redact(self, text: str, findings: List[Dict]) -> str:
-        if not findings:
-            return text
+        if not findings: return text
 
-        # FIX: Generate the unique tags map first!
         entity_map = self.create_boomerang_map(findings)
+        replacements = []
+        for f in findings:
+            tag = entity_map.get(f['text'])
+            if not tag:
+                label = f['label'].upper().replace(" ", "_")
+                tag = f"<{label}>"
 
-        sorted_findings = sorted(findings, key=lambda x: x['start'])
+            replacements.append({
+                "start": f['start'],
+                "end": f['end'],
+                "replacement": tag
+            })
+
+        for original, tag in entity_map.items():
+            if not re.match(r'^[a-zA-Z0-9\s]+$', original):
+                continue
+
+            pattern = r'\b' + re.escape(original) + r'\b'
+            for match in re.finditer(pattern, text):
+                replacements.append({
+                    "start": match.start(),
+                    "end": match.end(),
+                    "replacement": tag
+                })
+
+        sorted_replacements = sorted(replacements, key=lambda x: x['start'])
         non_overlapping = []
         last_end = -1
 
-        for f in sorted_findings:
-            if f['start'] >= last_end:
-                non_overlapping.append(f)
-                last_end = f['end']
-            else:
-                if f['end'] > last_end:
-                    if len(non_overlapping) > 0 and f['start'] <= non_overlapping[-1]['start']:
-                        non_overlapping.pop()
-                    non_overlapping.append(f)
-                    last_end = f['end']
+        for r in sorted_replacements:
+            if r['start'] >= last_end:
+                non_overlapping.append(r)
+                last_end = r['end']
+            elif r['end'] > last_end:
+                if non_overlapping and (r['end'] - r['start']) > (
+                        non_overlapping[-1]['end'] - non_overlapping[-1]['start']):
+                    non_overlapping.pop()
+                    non_overlapping.append(r)
+                    last_end = r['end']
 
         safe_text = text
-        for f in reversed(non_overlapping):
-            start, end = f['start'], f['end']
-            replacement = entity_map.get(f['text'])
-            if not replacement:
-                label = f['label'].upper().replace(" ", "_")
-                replacement = f"<{label}>"
+        for r in reversed(non_overlapping):
+            safe_text = safe_text[:r['start']] + r['replacement'] + safe_text[r['end']:]
 
-            if start < 0 or end > len(safe_text): continue
-            safe_text = safe_text[:start] + replacement + safe_text[end:]
         return safe_text

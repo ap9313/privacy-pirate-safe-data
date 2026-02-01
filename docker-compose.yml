@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    container_name: flask-backend
+    volumes:
+      - ./backend:/app
+      - backend_data:/app/data
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    container_name: nextjs-frontend
+    depends_on:
+      - backend
+    volumes:
+      - ./:/usr/src/app
+
+volumes:
+  backend_data:
