@@ -11,7 +11,7 @@ PORT = int(os.getenv("PORT", "8000"))
 # --- OLLAMA SETTINGS ---
 # Default to localhost for Mac/Local dev.
 # Use 'http://host.docker.internal:11434' ONLY if running backend inside Docker.
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 TIMEOUT_SECONDS = 300
 
 # --- MODEL REGISTRY ---
